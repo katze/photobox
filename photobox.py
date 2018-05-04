@@ -1,24 +1,32 @@
 # -*- coding: utf-8 -*
-import RPi.GPIO
+import logging
 import time
+import uuid
+import Adafruit_BluefruitLE
 from datetime import datetime
-from PIL import Image
+import subprocess
+import requests
+import json
 import os
+from threading import Thread
+from PIL import Image
+import RPi.GPIO
 import Adafruit_ILI9341 as TFT
 import Adafruit_GPIO as GPIO
 import Adafruit_GPIO.SPI as SPI
 
-from goprocam import GoProCamera
-from goprocam import constants
-import urllib.request
+# reset du BT
+command = "sudo hciconfig hci0 reset"
+os.system(command)
 
 
+UART_SERVICE_UUID = uuid.UUID('6E400001-B5A3-F393-E0A9-E50E24DCCA9E')
+TX_CHAR_UUID      = uuid.UUID('6E400002-B5A3-F393-E0A9-E50E24DCCA9E')
+RX_CHAR_UUID      = uuid.UUID('6E400003-B5A3-F393-E0A9-E50E24DCCA9E')
 
+ble = Adafruit_BluefruitLE.get_provider()
 
-#non attribué
 LED = 18
-
-
 
 RPi.GPIO.setmode(RPi.GPIO.BCM)
 RPi.GPIO.setup(LED, RPi.GPIO.OUT)
@@ -27,8 +35,6 @@ brightness = 50 # Brightness value must be between 0 (min) and 100 (max)
 pwm.start(brightness)
 
 
-
-GPIO_BUTTON = 26
 DC = 23
 RST = 25
 SPI_PORT = 0
@@ -40,44 +46,126 @@ disp.clear((255, 0, 0))
 disp.display()
 
 
-RPi.GPIO.setmode(RPi.GPIO.BCM)
-RPi.GPIO.setup(GPIO_BUTTON, RPi.GPIO.IN, pull_up_down=RPi.GPIO.PUD_UP)
-
-gpCam = GoProCamera.GoPro()
 
 
-def takepic(imageName): #prend une photo (note: il faut selectionner la ligne qui correspond Ã  votre installation en enlevant le premier # )
-    print("on prend une photo: " + imageName)
 
-    #prise d'une photo avec la GoPro
-    photoUrl = gpCam.take_photo(0)
+def mainBle():
 
-    #on affiche un message de traitement
-    image = Image.open('processing.jpg')
+    camera_offline = 1
+    previous_camera_offline = 1
+
+    # Clear any cached data because both bluez and CoreBluetooth have issues with
+    # caching data and it going stale.
+    ble.clear_cached_data()
+
+    # Get the first available BLE network adapter and make sure it's powered on.
+    adapter = ble.get_default_adapter()
+    adapter.power_on()
+    print('Using adapter: {0}'.format(adapter.name))
+
+    # Disconnect any currently connected UART devices.  Good for cleaning up and
+    # starting from a fresh state.
+    print('Disconnecting any connected UART devices...')
+    ble.disconnect_devices([UART_SERVICE_UUID])
+
+    # Scan for UART devices.
+    print('Searching for UART device...')
+    try:
+        adapter.start_scan()
+        # Search for the first UART device found (will time out after 60 seconds
+        # but you can specify an optional timeout_sec parameter to change it).
+        device = ble.find_device(service_uuids=[UART_SERVICE_UUID])
+        if device is None:
+            raise RuntimeError('Failed to find UART device!')
+    finally:
+        # Make sure scanning is stopped before exiting.
+        adapter.stop_scan()
+
+    print('Connecting to device...')
+    device.connect()
+
+    try:
+        print('Discovering services...')
+        device.discover([UART_SERVICE_UUID], [TX_CHAR_UUID, RX_CHAR_UUID])
+        uart = device.find_service(UART_SERVICE_UUID)
+        rx = uart.find_characteristic(RX_CHAR_UUID)
+        tx = uart.find_characteristic(TX_CHAR_UUID)
+
+        def received(data):
+            timer()
+            date_today = datetime.now()
+            nom_image = date_today.strftime('%d_%m_%H_%M_%S')
+
+            #on prend la photo
+            chemin_photo = '/home/pi/Desktop/photos/'+nom_image+'.jpg'
+            takepic(chemin_photo) #on prend la photo 
+
+            image = Image.open("wait.jpg")
+            disp.display(image)            
+
+        # Turn on notification of RX characteristics using the callback above.
+        print('Subscribing to RX characteristic changes...')
+        rx.start_notify(received)
+
+        while True:
+          time.sleep(1)
+          camera_offline = subprocess.call(["ping", "192.168.122.1", "-c1", "-W2", "-q"], stdout=open(os.devnull, 'w'))
+          if camera_offline == 1:
+            print("camera offline")
+            image = Image.open("offline.jpg")
+            disp.display(image)
+
+          else:
+            # si la camera viens tout juste d'être allumée il faut l'initialiser
+            if previous_camera_offline == 1:
+              print("camera wakeup")
+              data = {"method":"startRecMode", "params":[], "id":1, "version":"1.0"}
+              response = requests.post('http://192.168.122.1:8080/sony/camera', json=data)
+
+              image = Image.open("wait.jpg")
+              disp.display(image)   
+
+          previous_camera_offline = camera_offline
+
+    finally:
+        # Make sure device is disconnected on exit.
+        device.disconnect()
+        mainBle()
+
+
+def takepic(imageName):
+    print("mode photo")
+    data = {"method":"setShootMode", "params":["still"], "id":1, "version":"1.0"}
+    response = requests.post('http://192.168.122.1:8080/sony/camera', json=data)
+    print(response.status_code)
+
+    data = {"method":"actTakePicture", "params":[], "id":1, "version":"1.0"}
+    response = requests.post('http://192.168.122.1:8080/sony/camera', json=data)
+    print(response.text)
+    json_data = json.loads(response.text)
+
+
+    image = Image.open("processing.jpg")
     disp.display(image)
 
-    #téléchargement de la photo depuis la GoPro
-    urllib.request.urlretrieve(photoUrl, imageName)
+    url = json_data["result"][0][0]
+    url = url.replace("Scn", "Origin")
+    r = requests.get(url, stream=True)
 
-    #suppression de l'effet fisheye
-    command = "convert "+imageName+" -distort barrel '0.06335 -0.18432 -0.13009' "+imageName+"_fix"
-    os.system(command)
-
+    with open(imageName, 'wb') as fd:
+        for chunk in r.iter_content(2000):
+            fd.write(chunk)
 
     #Google sync
     command = "rclone sync -v /home/pi/Desktop/photos gdmedia:/gopro"
     os.system(command)
 
-def loadpic(imageName): # affiche imagename
     image = Image.open("done.jpg")
-    #image = image.resize((240, 320)).rotate(90+180)
-
     disp.display(image)
-    time.sleep(5)
-    print("loading image: " + imageName)
+    time.sleep(3)
 
 
-def minuterie():
+def timer():
   #image = Image.open('5.jpg')
   #disp.display(image)
   #time.sleep(1)
@@ -97,59 +185,5 @@ def minuterie():
   image = Image.open('0.jpg')
   disp.display(image)
 
-
-def writemessage(message): # pour pouvoir afficher des messages sur un font noir 
-    print("affiche message: " + message)
-
-
-def writemessagetransparent(message): # pour pouvoir afficher des messages en conservant le font 
-    print("affiche message: " + message)
-
-
-if (os.path.isdir("/home/pi/Desktop/photos") == False): # si le dossier pour stocker les photos n'existe pas       
-   os.mkdir("/home/pi/Desktop/photos")                  # alors on crÃ©e le dossier (sur le bureau)
-   os.chmod("/home/pi/Desktop/photos",0o777)            # et on change les droits pour pouvoir effacer des photos
-
-
-while True : #boucle jusqu'a interruption
-  try:
-        print("attente boucle")
-
-        image = Image.open('wait.jpg')
-        disp.display(image)        
-
-        #on attend que le bouton soit pressÃ©
-        RPi.GPIO.wait_for_edge(GPIO_BUTTON, RPi.GPIO.FALLING)
-        # on a appuyÃ© sur le bouton...
-
-
-        #on lance le decompte
-        minuterie()
-
-
-        #on genere le nom de la photo avec heure_min_sec
-        date_today = datetime.now()
-        nom_image = date_today.strftime('%d_%m_%H_%M_%S')
-
-       
-        #on prend la photo
-        chemin_photo = '/home/pi/Desktop/photos/'+nom_image+'.jpg'
-        takepic(chemin_photo) #on prend la photo 
-
-        #on affiche la photo
-        loadpic(chemin_photo)
-
-        #on affiche un message
-        writemessagetransparent("et voila...")
-
-        if (RPi.GPIO.input(GPIO_BUTTON) == 0): #si le bouton est encore enfoncÃ© (sont etat sera 0)
-              print("bouton  appuye, je dois sortir")
-              break # alors on sort du while 
-             
-
-  except KeyboardInterrupt:
-    print("sortie du programme!")
-    raise
-
-RPi.GPIO.cleanup()           # reinitialisation GPIO lors d'une sortie normale
-disp.clear()
+ble.initialize()
+ble.run_mainloop_with(mainBle)
