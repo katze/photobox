@@ -45,7 +45,7 @@ disp.begin()
 disp.clear((255, 0, 0))
 disp.display()
 
-
+last_message = "hello"
 
 
 
@@ -100,8 +100,7 @@ def mainBle():
             chemin_photo = '/home/pi/Desktop/photos/'+nom_image+'.jpg'
             takepic(chemin_photo) #on prend la photo 
 
-            image = Image.open("wait.jpg")
-            disp.display(image)            
+            showMessage("wait.jpg")
 
         # Turn on notification of RX characteristics using the callback above.
         print('Subscribing to RX characteristic changes...')
@@ -112,8 +111,7 @@ def mainBle():
           camera_offline = subprocess.call(["ping", "192.168.122.1", "-c1", "-W2", "-q"], stdout=open(os.devnull, 'w'))
           if camera_offline == 1:
             print("camera offline")
-            image = Image.open("offline.jpg")
-            disp.display(image)
+            showMessage("offline.jpg")
 
           else:
             # si la camera viens tout juste d'être allumée il faut l'initialiser
@@ -122,8 +120,7 @@ def mainBle():
               data = {"method":"startRecMode", "params":[], "id":1, "version":"1.0"}
               response = requests.post('http://192.168.122.1:8080/sony/camera', json=data)
 
-              image = Image.open("wait.jpg")
-              disp.display(image)   
+              showMessage("wait.jpg")
 
           previous_camera_offline = camera_offline
 
@@ -131,6 +128,23 @@ def mainBle():
         # Make sure device is disconnected on exit.
         device.disconnect()
         mainBle()
+
+def showMessage(image_path):
+    global last_message
+    try:
+        print("on veut afficher un message")
+        print('last_message = {0}'.format(last_message))
+        if last_message != image_path:
+            print("on change le message")
+            image = Image.open(image_path)
+            disp.display(image)
+        else:
+            print("on ne change pas le message")
+        last_message = image_path
+
+    except Exception, e:
+        print('Grrrrrr: {0}'.format(e))
+
 
 
 def takepic(imageName):
@@ -145,8 +159,7 @@ def takepic(imageName):
     json_data = json.loads(response.text)
 
 
-    image = Image.open("processing.jpg")
-    disp.display(image)
+    showMessage("processing.jpg")
 
     url = json_data["result"][0][0]
     url = url.replace("Scn", "Origin")
@@ -160,30 +173,22 @@ def takepic(imageName):
     command = "rclone sync -v /home/pi/Desktop/photos gdmedia:/gopro"
     os.system(command)
 
-    image = Image.open("done.jpg")
-    disp.display(image)
+    showMessage("done.jpg")
     time.sleep(3)
 
 
 def timer():
-  #image = Image.open('5.jpg')
-  #disp.display(image)
+  #showMessage('5.jpg')
   #time.sleep(1)
-  #image = Image.open('4.jpg')
-  #disp.display(image)
+  #showMessage('4.jpg')
   #time.sleep(1)
-  image = Image.open('3.jpg')
-  disp.display(image)
+  showMessage('3.jpg')
   time.sleep(1)
-  image = Image.open('2.jpg')
-  disp.display(image)
+  showMessage('2.jpg')
   time.sleep(1)
-  image = Image.open('1.jpg')
-  disp.display(image)
+  showMessage('1.jpg')
   time.sleep(1)
-
-  image = Image.open('0.jpg')
-  disp.display(image)
+  showMessage('0.jpg')
 
 ble.initialize()
 ble.run_mainloop_with(mainBle)
